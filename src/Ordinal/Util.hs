@@ -2,57 +2,40 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 module Ordinal.Util
   ( InfiniteList(..)
-  , NonZeroNat(..)
+  , flipOrder
   , iterateInfinite
-  , nznList
-  , nznOne
-  , nznPlus
-  , predecessor
-  , successor
+  , mapFst
+  , nats
   )
 where
 
-import Numeric.Natural (Natural)
-import Data.Types.Injective (Injective, to)
-import Data.Types.Isomorphic (Iso)
+import Data.Strict.Sequence (Seq)
+import Data.Strict.Tuple    (Pair(..))
+import Numeric.Natural      (Natural)
 
 
--- | A variant of `Natural` without zero. `PlusOne 0` corresponds to 1,
--- `PlusOne 1`, to 2, etc. Conversely, applying `minusOne` to the value
--- representing n gives n-1
-newtype NonZeroNat = PlusOne { minusOne :: Natural }
-  deriving (Eq, Ord, Show)
+flipOrder :: Ordering -> Ordering
+flipOrder LT = GT
+flipOrder EQ = EQ
+flipOrder GT = LT
 
-instance Injective Natural (Maybe NonZeroNat) where
-  to n = PlusOne <$> minusNaturalMaybe n 1
-    where minusNaturalMaybe x y = if x < y then Nothing else Just $ x - y
+mapFst :: (a -> b) -> Seq (Pair a c) -> Seq (Pair b c)
+mapFst f = fmap (\(x :!: y) -> f x :!: y)
 
-instance Injective (Maybe NonZeroNat) Natural where
-  to Nothing  = 0
-  to (Just n) = minusOne n + 1
-
-instance Iso Natural (Maybe NonZeroNat)
-
-nznOne :: NonZeroNat
-nznOne = PlusOne 0
-
-nznPlus :: NonZeroNat -> NonZeroNat -> NonZeroNat
-nznPlus (PlusOne n1) (PlusOne n2) = successor $ PlusOne $ n1 + n2
-
-successor :: NonZeroNat -> NonZeroNat
-successor n = PlusOne $ minusOne n + 1
-
-predecessor :: NonZeroNat -> Maybe NonZeroNat
-predecessor n = to $ minusOne n
+infixr 6 :.:
 
 data InfiniteList a = a :.: (InfiniteList a)
 
 instance Functor InfiniteList where
   fmap f (x :.: xs) = f x :.: fmap f xs
 
+-- | List of repeated applications of a given function on a given argument,
+-- starting at 0 applications.
+-- ```
+-- iterateInfinite f x = x :.: f x :.: f (f x) :.: f (f (f x)) :.: ...
 iterateInfinite :: (a -> a) -> a -> InfiniteList a
 iterateInfinite f x = x :.: fmap f (iterateInfinite f x)
 
-nznList :: InfiniteList NonZeroNat
-nznList = listFrom (PlusOne 0)
-  where listFrom n = n :.: listFrom (successor n)
+-- | All natural numbers, in order
+nats :: InfiniteList Natural
+nats = iterateInfinite (+ 1) 0
