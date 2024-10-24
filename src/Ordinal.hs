@@ -1,187 +1,210 @@
+{-# LANGUAGE OverloadedLists #-}
+
 module Ordinal
   ( Ordinal
-  , OrdinalType(..)
-  , fromNat, omega, omega2, omegaSquared, omegaOmega
+  , OrdinalType
+  , (.+.)
+  , zeroOrd, fromNat, omega, omega2, omegaSquared, omegaOmega
+  , isValid
   , normalize
   , omegaPower
   , ordinalType
   , successor
-  , (*+*)
   )
 where
 
+-- We will use `fst` and `snd` on strict pairs, so we hide the default ones:
+import Prelude hiding (fst, snd)
+
 import Data.Functor ((<&>))
-import Data.Strict.Sequence (Seq(..), empty, singleton, sort)
-import Data.Strict.Tuple (Pair(..))
-import Data.Types.Injective (to)
+import Data.Strict.Sequence (Seq(..), sort)
+import Data.Strict.Tuple (Pair(..), fst, snd)
 import Numeric.Natural (Natural)
 import qualified Ordinal.Util as Util
 
 
 -- | Ordinals less than epsilon_epsilon_epsilon_...
+-- We represent ordinals using the Cantor normal form (CNF) whenever possible,
+-- i.e. when the number is not an epsilon number.
+-- For a given ordinal, there are many ways to express it as a member of this
+-- type. Thus we consider only a subset of values to be valid representations
+-- of ordinals; this subset is in one-to-one correspondence with the set of
+-- ordinals which we are considering here. The validity of a representation is
+-- determined by the (total) `isValid` function.
+-- The implementation of this type will not be exposed, and (assuming no error
+-- on my part) the functions in this module only produce valid ordinal
+-- representations, so it shouldn't be possible for a user to accidentally
+-- produce an invalid representation.
 --
--- We make use of the Cantor Normal Form (CNF). We will generally use:
--- - The letter b to refer to the ordinals inside a given CNF,
--- - The letter c to refer to the naturals inside a given CNF.
--- 
--- By convention, `CNF []` represents zero.
---
--- - Important note: The following conditions are assumed to be fulfilled:
---   - In the CNF constructor, the sequence of ordinals is assumed to be
---     strictly decreasing.
---   - `Epsilon` values are not wrapped alone in a `CNF` constructor
---     (i.e. the following is NOT valid, whatever the value of `x`:)
---     ```
---     CNF (singleton (Epsilon x :!: Util.nznOne))
---     ```
---   - omega is never explicitly raised to the power of an epsilon number
---     (since omega^eps = eps for any epsilon number eps, we systematically
---     favour the latter)
---   Of course, those conditions need to be fulfilled no matter how deeply
---   nested the culprit is.
---   If you have a value of this type, but you are not sure whether it fulfils
---   the above conditions, you can apply the function `normalize` to it.
---
--- - Reminder to implementers:
+-- A note to implementers:
+--   - We will generally use the letters `b` and `c` to refer respectively to
+--     ordinals and natural numbers appearing in a CNF
 --   - `Seq` is like a strict list, except you can pattern match on it both
 --     from the left, using `:<|`, and from the right, using `:|>`
 --   - `Pair` is like a strict tuple, with the `:!:` being the counterpart of
 --     the comma.
-data Ordinal = CNF (Seq (Pair Ordinal Util.NonZeroNat)) | Epsilon Ordinal
-  deriving Eq -- the `Eq` instance heavily relies on the above conditions being fulfilled
+data Ordinal = CNFOrd !CNF | Epsilon !Ordinal
+  -- | The `Eq` instance makes the distinction between two representations of
+  -- the same ordinal, but will be correct assuming we are comparing to valid
+  -- representations:
+  deriving Eq
 
-type CNFSeq = Seq (Pair Ordinal Util.NonZeroNat)
+type CNF = Seq (Pair Ordinal Natural)
 
-cnfMap :: (Ordinal -> Ordinal) -> CNFSeq -> CNFSeq
-cnfMap f = fmap $ \(b :!: c) -> (f b :!: c)
+-- | Like `Eq`, the `Ord` instance will only be correct assuming the compared
+-- values are valid represenations of an ordinal.
+instance Ord Ordinal where
+  compare (CNFOrd []) (CNFOrd []) = EQ
+  compare (CNFOrd []) (CNFOrd _ ) = GT
+  compare (CNFOrd ((b1 :!: c1) :<| terms1)) (CNFOrd ((b2 :!: c2) :<| terms2)) =
+    case compare b1 b2 of
+      EQ -> case compare c1 c2 of
+        EQ   -> compare terms1 terms2
+        comp -> comp
+      comp -> comp
+  -- `CNFOrd [e :!: 1]` is not a valid ordinal, but we make an exception just
+  -- here so we can reduce the problem to a case we've treated before:
+  compare cnf@(CNFOrd _) e@(Epsilon _) = compare cnf (CNFOrd [e :!: 1])
+  compare (Epsilon ord1) (Epsilon ord2) = compare ord1 ord2
+  -- All remaining cases are flipped versions of already treated cases:
+  compare ord1 ord2 = Util.flipOrder $ compare ord2 ord1
+
+isValid :: Ordinal -> Bool
+isValid cnf@(CNFOrd terms) = not (isEpsilonInDisguise cnf)         &&
+                          isStrictlyDecreasing (fmap fst terms) &&
+                          all (/= 0) (fmap snd terms)
+isValid (Epsilon e) = isValid e
+ 
+isEpsilon :: Ordinal -> Bool
+isEpsilon (Epsilon _) = True
+isEpsilon _ = False
+
+isEpsilonInDisguise :: Ordinal -> Bool
+isEpsilonInDisguise (CNFOrd [b :!: 1]) = isEpsilon b || isEpsilonInDisguise b
+isEpsilonInDisguise _ = False
+
+isStrictlyDecreasing :: Ord a => Seq a -> Bool
+isStrictlyDecreasing (x :<| y :<| xs) = x > y && isStrictlyDecreasing (y :<| xs)
+isStrictlyDecreasing _ = True
 
 
--- | Take an ordinal that may not be well-formed, and get it into the right form.
--- You shouldn't need this, unless you touch this module's implementation.
+
+-- -- | Take an ordinal that may not be well-formed, and get it into the right form.
+-- -- You shouldn't need this, unless you touch this module's implementation.
 normalize :: Ordinal -> Ordinal
 normalize (Epsilon o) = Epsilon $ normalize o
-normalize (CNF s) = collapse $ CNF $ merge . sort . cnfMap normalize $ s
+normalize (CNFOrd s) =
+  shallowCollapse $ CNFOrd $ shallowMerge . sort . Util.mapFst normalize $ s
   where
   -- | Given an *ordered* sequence of omega-terms where not every term is
   -- necessarily distinct, merge the terms that are the same
-  merge :: CNFSeq -> CNFSeq
-  merge Empty = Empty
-  merge (t :<| Empty) = t :<| Empty
-  merge (t1@(b1 :!: c1) :<| cnf'@((b2 :!: c2) :<| cnf''))
-    | b1 == b2  = merge $ (b1 :!: Util.nznPlus c1 c2) :<| cnf''
+  shallowMerge :: CNF -> CNF
+  shallowMerge Empty = []
+  shallowMerge (t :<| Empty) = [t]
+  shallowMerge (t1@(b1 :!: c1) :<| cnf'@((b2 :!: c2) :<| cnf''))
+    | b1 == b2  = shallowMerge $ (b1 :!: c1 + c2) :<| cnf''
     | otherwise = t1 :<| cnf'
-  -- | If the input ordinal is a simple epsilon number wrapped in a `CNF`
-  -- constructor, unwrap it
-  collapse :: Ordinal -> Ordinal
-  collapse o@(CNF ((Epsilon alpha :!: c) :<| Empty)) = if c == Util.nznOne
-    then Epsilon alpha
-    else o
-  collapse o = o
+
+-- | If the input ordinal is a simple epsilon number wrapped in a `CNF`
+-- constructor, unwrap it
+shallowCollapse :: Ordinal -> Ordinal
+shallowCollapse (CNFOrd ((Epsilon o :!: 1) :<| Empty)) = Epsilon o
+shallowCollapse o = o
 
 -- | Take omega to the power of this ordinal
 omegaPower :: Ordinal -> Ordinal
 omegaPower eps@(Epsilon _) = eps -- omega to the power of an epsilon number equals that epsilon number
-omegaPower ord = CNF $ singleton $ ord :!: Util.nznOne
-
--- | Sum two ordinals. This function heavily relies on certain conditions being
--- fulfilled by the representations of `o1` and `o2`; see the documentation of
--- the `Ordinal` datatype.
-(*+*) :: Ordinal -> Ordinal -> Ordinal
-(CNF Empty) *+* o2 = o2
-o1 *+* (CNF Empty) = o1
-o1 *+* o2 = CNF $ cnfPlus (cnf o1) (cnf o2)
-        -- | Addition for CNF
-  where cnfPlus :: CNFSeq -> CNFSeq -> CNFSeq
-        cnfPlus Empty s2 = s2
-        cnfPlus s1 Empty = s1
-        cnfPlus cnf1@((b1 :!: c1) :<| cnf1') cnf2@((b2 :!: c2) :<| cnf2') =
-          case compare b1 b2 of
-            GT -> (b1 :!:         c1        ) :<| (cnf1' `cnfPlus` cnf2 )
-            LT -> (b2 :!:         c2        ) :<| (cnf1  `cnfPlus` cnf2')
-            EQ -> (b1 :!: Util.nznPlus c1 c2) :<| (cnf1' `cnfPlus` cnf2')
-
--- | Gets the Cantor Normal Form of an ordinal. To draw attention of the fact
--- that this does not necessarily output a valid representation of an ordinal
--- (if an epsilon number is given as input, the result will be a wrapped
--- epsilon number), we don't wrap the result in a `CNF` constructor of the
--- `Ordinal` type.
-cnf :: Ordinal -> Seq (Pair Ordinal Util.NonZeroNat)
-cnf ord = case ord of
-  CNF     l -> l
-  Epsilon _ -> singleton $ ord :!: Util.nznOne
+omegaPower ord = CNFOrd [ord :!: 1]
 
 
 successor :: Ordinal -> Ordinal
 -- | CNF with a unit term
-successor (CNF (cnf' :|> (CNF Empty :!: c))) =
-  CNF $ cnf' :|> (CNF Empty :!: Util.successor c)
+successor (CNFOrd (cnf' :|> (CNFOrd [] :!: c))) =
+  CNFOrd $ cnf' :|> (CNFOrd [] :!: c + 1)
 -- | CNF with no unit term
-successor (CNF s) = CNF $ s :|> (CNF Empty :!: Util.nznOne)
+successor (CNFOrd s) = CNFOrd $ s :|> (CNFOrd [] :!: 1)
 -- | Epsilon number
-successor o = successor $ CNF $ cnf o
+successor o = CNFOrd [o :!: 1, CNFOrd [] :!: 1]
 
 -- Some "standard" ordinals
 
 zeroOrd :: Ordinal
-zeroOrd = CNF Empty
+zeroOrd = CNFOrd []
 
 fromNat :: Natural -> Ordinal
-fromNat n = case to n of
-  Nothing -> CNF empty
-  Just nonZeroN -> CNF $ singleton $ CNF empty :!: nonZeroN
+fromNat n = case n of
+  0 -> zeroOrd
+  _ -> CNFOrd [zeroOrd :!: n]
 
 omega :: Ordinal
-omega = CNF $ singleton $ fromNat 1 :!: Util.nznOne
+omega = CNFOrd [fromNat 1 :!: 1]
 
+-- | Omega times 2
 omega2 :: Ordinal
-omega2 = CNF $ singleton $ fromNat 1 :!: Util.PlusOne 1
+omega2 = CNFOrd [fromNat 1 :!: 2]
 
 omegaSquared :: Ordinal
-omegaSquared = CNF $ singleton $ fromNat 2 :!: Util.nznOne
+omegaSquared = CNFOrd [fromNat 2 :!: 1]
 
 -- | Omega to the power of omega
 omegaOmega :: Ordinal
-omegaOmega = CNF $ singleton $ omega :!: Util.nznOne
+omegaOmega = CNFOrd [omega :!: 1]
 
 
--- | Output type for `ordinalType`: the type of ordinal, and associated data
-data OrdinalType = ZeroType                          -- ^ Just zero
-                 | Successor Ordinal                 -- ^ Predecessor of the ordinal if it is a successor
-                 | Limit (Util.InfiniteList Ordinal) -- ^ Limit sequence of the ordinal if it i a limit ordinal
+-- | The type of answers we get when asking for the predecessor of an ordinal:
+-- either the ordinal is `Zero` (so no predecessor), or it is a `Successor`
+-- ordinal (so one predecessor), or it is the `Limit` of an infinite list of
+-- ordinals (its *limit sequence*)
+data OrdinalType = ZeroType
+                 -- ^ Just zero
+                 | Successor Ordinal
+                 -- ^ Predecessor of the ordinal if it is a successor
+                 | Limit (Util.InfiniteList Ordinal)
+                 -- ^ Limit sequence of the ordinal if it is a limit ordinal
 
 -- | Gives the predecessor of a given ordinal, if applicable. If it is a limit
 -- ordinal, give a sequence that has it as a limit instead.
 ordinalType :: Ordinal -> OrdinalType
-ordinalType (CNF Empty) = ZeroType
-ordinalType (CNF (cnf' :|> (b :!: c))) = case ordinalType b of
-  ZeroType -> case Util.predecessor c of
-    Nothing -> Successor $ CNF cnf'
-    Just cPred -> Successor $ CNF $ cnf' :|> (b :!: cPred)
-  Successor bPred -> Limit $ case Util.predecessor c of
-    Nothing -> Util.nznList <&> \n ->
-      CNF $ cnf' :|> (bPred :!: n)
-    Just cPred -> Util.nznList <&> \n ->
-      CNF $ cnf' :|> (b :!: cPred) :|> (bPred :!: n)
-  Limit limitSequence -> Limit $ case Util.predecessor c of
-    Nothing -> limitSequence <&> \bn ->
-      CNF $ cnf' :|> (bn :!: Util.nznOne)
-    Just cPred -> limitSequence <&> \bn ->
-      CNF $ cnf' :|> (b :!: cPred) :|> (bn :!: Util.nznOne)
+ordinalType (CNFOrd Empty) = ZeroType
+ordinalType (CNFOrd (cnf' :|> (b :!: c))) = case ordinalType b of
+  ZeroType -> case c of
+    0 -> Successor $ CNFOrd cnf'
+    _ -> Successor $ CNFOrd $ cnf' :|> (b :!: c - 1)
+  Successor bPred -> Limit $ case c of
+    0 -> Util.nats <&> \n ->
+      CNFOrd $ cnf' :|> (bPred :!: n)
+    _ -> Util.nats <&> \n ->
+      CNFOrd $ cnf' :|> (b :!: c - 1) :|> (bPred :!: n)
+  Limit limitSequence -> Limit $ case c of
+    0 -> limitSequence <&> \bn ->
+      CNFOrd $ cnf' :|> (bn :!: 1)
+    _ -> limitSequence <&> \bn ->
+      CNFOrd $ cnf' :|> (b :!: c - 1) :|> (bn :!: 1)
 ordinalType (Epsilon o) = Limit $ case ordinalType o of
   ZeroType -> Util.iterateInfinite omegaPower zeroOrd
   Successor oPred -> Util.iterateInfinite omegaPower $ successor $ Epsilon oPred
   Limit limitSequence -> Epsilon <$> limitSequence
 
-
-instance Ord Ordinal where
-  compare (CNF Empty) (CNF Empty) = EQ
-  compare (CNF Empty) (CNF _    ) = GT
-  compare (CNF _    ) (CNF Empty) = LT
-  compare (CNF ((ord1 :!: digit1) :<| xs1))
-          (CNF ((ord2 :!: digit2) :<| xs2)) = case compare ord1 ord2 of
-    EQ -> case compare digit1 digit2 of
-      EQ   -> compare xs1 xs2
-      comp -> comp
-    comp -> comp
-  compare (Epsilon ord1) (Epsilon ord2) = compare ord1 ord2
-  compare ord1 ord2 = compare (cnf ord1) (cnf ord2)
+-- | Ordinal sum
+(.+.) :: Ordinal -> Ordinal -> Ordinal
+CNFOrd Empty .+. o = o
+o .+. CNFOrd Empty = o
+CNFOrd ((b1 :!: c1) :<| terms1) .+. o2@(CNFOrd ((b2 :!: _) :<| _)) =
+  case compare b1 b2 of
+    LT -> o2
+    _  -> case (b1, c1, CNFOrd terms1 .+. o2) of
+      (Epsilon _, 1, CNFOrd Empty) -> b1
+      (_, _, CNFOrd terms3) -> CNFOrd $ (b1 :!: c1) :<| terms3
+      (_, _, e@(Epsilon _)) -> case compare b1 e of
+        LT -> e
+        EQ -> CNFOrd [b1 :!: c1 + 1]
+        GT -> CNFOrd [b1 :!: c1, e :!: 1]
+-- `CNFOrd [o :!: 1]` is not a valid ordinal, but we make an exception in the
+-- following two lines so we can reduce the problem to a case we've treated
+-- before:
+o1@(CNFOrd _) .+. o2@(Epsilon _) = o1 .+. CNFOrd [o2 :!: 1]
+o1@(Epsilon _) .+. o2@(CNFOrd _) = CNFOrd [o1 :!: 1] .+. o2
+Epsilon o1 .+. Epsilon o2 = case compare o1 o2 of
+  LT -> o2
+  EQ -> CNFOrd [o1 :!: 2]
+  GT -> CNFOrd [o1 :!: 1, o2 :!: 1]
