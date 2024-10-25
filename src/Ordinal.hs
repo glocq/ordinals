@@ -9,16 +9,15 @@ module Ordinal
   , normalize
   , omegaPower
   , ordinalType
+  , pretty
   , successor
   )
 where
 
--- We will use `fst` and `snd` on strict pairs, so we hide the default ones:
-import Prelude hiding (fst, snd)
-
 import Data.Functor ((<&>))
 import Data.Strict.Sequence (Seq(..), sort)
-import Data.Strict.Tuple (Pair(..), fst, snd)
+import Data.Strict.Tuple (Pair(..))
+import qualified Data.Strict.Tuple as Tup
 import Numeric.Natural (Natural)
 import qualified Ordinal.Util as Util
 
@@ -47,15 +46,45 @@ data Ordinal = CNFOrd !CNF | Epsilon !Ordinal
   -- | The `Eq` instance makes the distinction between two representations of
   -- the same ordinal, but will be correct assuming we are comparing to valid
   -- representations:
-  deriving Eq
+  deriving (Show, Eq)
 
 type CNF = Seq (Pair Ordinal Natural)
+
+
+-- | Pretty printer. TODO fix this, parenthesizing does not work well for now
+pretty :: Ordinal -> String
+pretty = fst . prettyAux
+
+-- | Helper function for `pretty`. Returns a pretty string, as well as a Bool
+-- indicating whether the string should be parenthesized if it is part of a
+-- larger expression.
+prettyAux :: Ordinal -> (String, Bool)
+prettyAux (CNFOrd Empty) = ("0", False)
+prettyAux (CNFOrd (t :<| Empty)) = prettyTerm t
+prettyAux (CNFOrd (t :<| ts   )) =
+  (parenthesize (prettyTerm t) <> " + " <> parenthesize (prettyAux (CNFOrd ts)), True)
+prettyAux (Epsilon o) = ("\949_" <> parenthesize (prettyAux o), False)
+
+-- | Helper function. Parenthesize the first argument iff the second is `True`
+parenthesize :: (String, Bool) -> String
+parenthesize (str, False) = str
+parenthesize (str, True ) = "(" <> str <> ")"
+
+-- | Helper function for `prettyAux`
+prettyTerm :: Pair Ordinal Natural -> (String, Bool)
+prettyTerm (CNFOrd Empty :!: c) = (show c, False)
+prettyTerm ((Epsilon o) :!: c) = case c of
+  1 -> ("\949_" <> parenthesize (prettyAux o), False)
+  _ -> ("\949_" <> parenthesize (prettyAux o) <> (" \8901 " <> show c), True)
+prettyTerm (b :!: c) = case c of
+  1 -> ("\969^" <> parenthesize (prettyAux b), False)
+  _ -> ("\969^" <> parenthesize (prettyAux b) <> (" \8901 " <> show c), True)
 
 -- | Like `Eq`, the `Ord` instance will only be correct assuming the compared
 -- values are valid represenations of an ordinal.
 instance Ord Ordinal where
   compare (CNFOrd []) (CNFOrd []) = EQ
-  compare (CNFOrd []) (CNFOrd _ ) = GT
+  compare (CNFOrd []) (CNFOrd _ ) = LT
   compare (CNFOrd ((b1 :!: c1) :<| terms1)) (CNFOrd ((b2 :!: c2) :<| terms2)) =
     case compare b1 b2 of
       EQ -> case compare c1 c2 of
@@ -71,8 +100,8 @@ instance Ord Ordinal where
 
 isValid :: Ordinal -> Bool
 isValid cnf@(CNFOrd terms) = not (isEpsilonInDisguise cnf)         &&
-                          isStrictlyDecreasing (fmap fst terms) &&
-                          all (/= 0) (fmap snd terms)
+                          isStrictlyDecreasing (fmap Tup.fst terms) &&
+                          all (/= 0) (fmap Tup.snd terms)
 isValid (Epsilon e) = isValid e
  
 isEpsilon :: Ordinal -> Bool
